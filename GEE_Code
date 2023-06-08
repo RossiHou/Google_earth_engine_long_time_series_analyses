@@ -1,0 +1,218 @@
+var roi= ee.FeatureCollection("users/houweitao3/Philippines/Region_NCR")
+Map.centerObject(roi,8)
+Map.addLayer(roi,{},'ROI')
+
+var mcd12q1 = ee.ImageCollection('MODIS/006/MCD12Q1')
+              .filterDate("2008-01-01","2016-12-31")
+              .select('LC_Type1')
+              .median()
+              .clip(roi)
+       
+var my_scale = 500
+
+//1--urban,0--not urban
+var fromList = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17];
+var toList =   [0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0]
+var mcd12q1reclass = mcd12q1.remap({
+  from: fromList,
+  to: toList,
+  defaultValue: 0,
+  bandName: 'LC_Type1'
+});
+
+
+var year_urban_use = 2008
+var after10_year = "2008";    
+
+var palettes_all = [  
+    '05450a', 'ff6d4c',  
+    '69fff8', 'f9ffa4', '1c0dff'  
+  ]
+var cal_names=['not_urban','urban']
+
+var palettes = palettes_all.slice(0,cal_names.length)
+Map.addLayer(mcd12q1reclass, {min: 0, max: 1, palette: palettes}, "Land Cover");
+
+
+
+var srtm = ee.Image("USGS/SRTMGL1_003");  
+var dem = ee.Algorithms.Terrain(srtm);  
+var elevation = dem.select("elevation");  
+var slope = dem.select("slope");  
+var modis_bands = [  
+  'red','nir','blue','green','swir1',  
+  "SLOPE", "ELEVATION"  
+];  
+
+var collection_modis=ee.ImageCollection("MODIS/061/MOD09A1")
+var yearList = ee.List.sequence(year_urban_use, year_urban_use);  
+var monthList = ee.List.sequence(1, 12);  
+var imgList = yearList.map(function(year) {  
+  year = ee.Number(year);  
+  var monthImgList = monthList.map(function(month) {  
+    month = ee.Number(month);  
+    var tempCol = collection_modis.filter(ee.Filter.calendarRange(year, year, "year"))  
+                    .filter(ee.Filter.calendarRange(month, month, "month")) 
+                    .filterBounds(roi)
+                    .select(['sur_refl_b01', 'sur_refl_b02', 'sur_refl_b03','sur_refl_b04','sur_refl_b07']
+                                   ,['red','nir','blue','green','swir1'])
+                    
+    var img = tempCol.median().addBands(slope.rename("SLOPE")).addBands(elevation.rename("ELEVATION"));  
+    img = img.set("count", tempCol.size());  
+    img = img.set("year", year);  
+    img = img.set("month", month);  
+    var date = ee.Date.fromYMD(year, month, 1);  
+    img = img.set("system:index", date.format("yyyyMM"));  
+    img = img.set("system:time_start", date.millis());  
+    return img;  
+  });  
+  return monthImgList;  
+});  
+imgList = imgList.flatten();  
+print("month image list", imgList);  
+var modis_final = ee.ImageCollection.fromImages(imgList)  
+               .filter(ee.Filter.gt("count", 0));  
+print("month image collection", modis_final);  
+  
+var randomPoint = ee.FeatureCollection.randomPoints({  
+  region: roi,   
+  points: 5000  
+});  
+
+  
+var sample_test = randomPoint.map(function(feature) {  
+    var dict = mcd12q1reclass.reduceRegion({  
+    reducer: ee.Reducer.mean(),  
+    geometry: feature.geometry(),   
+    scale: my_scale,  
+    bestEffort: true
+  });  
+  var LC_Type1 = dict.get("remapped");  
+  feature = feature.set("remapped", LC_Type1);  
+  return feature;  
+  }); 
+
+
+
+
+var classified = modis_final.map(function(img){
+  var sampledata=sample_test
+  sampledata = sampledata.randomColumn('random');
+  var fea_train = sampledata.filter('random <= 0.7');
+  var fea_test = sampledata.filter('random > 0.7');
+  var training = img.sampleRegions({  
+    collection: fea_train,   
+    properties: ["remapped"],   
+    scale: my_scale,
+    tileScale: 16
+    }); 
+  
+  var classifier = ee.Classifier.smileCart().train({  //----60
+  features: training,   
+  classProperty: "remapped",  
+  inputProperties: modis_bands
+  }); 
+
+  return img.classify(classifier)
+
+})
+
+
+var jan_to_sep = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP"]
+var oct_dec = ["OCT","NOV","DEC"]
+
+
+var totalArea_m2 = roi.geometry().area()
+var totalAreaSqKm = ee.Number(totalArea_m2).divide(1e6).round()
+print("totalAreaSqKm",totalAreaSqKm)
+
+
+var result_list = ee.List([]);
+var result_list_10 = ee.List([]);
+
+for(var i=1;i<=12;i++){
+  if (i <= "9"){
+  var result = classified.filter(ee.Filter.eq('system:index', year_urban_use+'0'+i)).toBands()
+  var dict = ee.Image.pixelArea()  
+            .addBands(result)  
+            .reduceRegion({  
+              reducer:ee.Reducer.sum().group({  
+                groupField:1,  
+                groupName:'type',  
+              }),  
+              geometry:roi,  
+              scale:my_scale,  
+              maxPixels:1e13,
+              bestEffort: true
+            });  
+  
+  var groups = ee.List(dict.get("groups"));  
+  var typeNames = ee.List(["not_urban", "urban"]);  //urban--1
+  var featureList = groups.map(function(group){  
+    group = ee.Dictionary(group);  
+    var area = ee.Number(group.get("sum"));  
+    area = area.divide(1000000);  
+    var type = ee.Number(group.get("type"));  
+    var f = ee.Feature(null, {  
+    "type": type,   
+    "area": area,   
+    "name": typeNames.get(type.subtract(0))  
+    });  
+  return f;  
+   });  
+  var areaFCol = ee.FeatureCollection(featureList);  
+  var result = ee.List([])
+  var second_feature = ee.Feature(areaFCol.toList(2).get(1));
+  var get_area = second_feature.get('area');
+  var final_percent = ee.Number(get_area).divide(totalAreaSqKm).multiply(100);
+  var result_list = result_list.add(final_percent) 
+  print(jan_to_sep[i-1] + ' urban %',final_percent);
+}
+  else{
+   var result = classified.filter(ee.Filter.eq('system:index', after10_year+i)).toBands()
+  var dict = ee.Image.pixelArea()  
+            .addBands(result)  
+            .reduceRegion({  
+              reducer:ee.Reducer.sum().group({  
+                groupField:1,  
+                groupName:'type',
+                
+              }),  
+              geometry:roi,  
+              scale:my_scale,  
+              maxPixels:1e13,
+              bestEffort: true
+            });  
+  
+  var groups = ee.List(dict.get("groups"));  
+  var typeNames = ee.List(["not_urban", "urban"]);  //urban--1
+  var featureList = groups.map(function(group){  
+    group = ee.Dictionary(group);  
+    var area = ee.Number(group.get("sum"));  
+    area = area.divide(1000000);  
+    var type = ee.Number(group.get("type"));  
+    var f = ee.Feature(null, {  
+    "type": type,   
+    "area": area,   
+    "name": typeNames.get(type.subtract(0))  
+    });  
+  return f;  
+   });  
+  var areaFCol = ee.FeatureCollection(featureList);  
+  
+  var second_feature = ee.Feature(areaFCol.toList(2).get(1));
+  var get_area = second_feature.get('area');
+  var final_percent = ee.Number(get_area).divide(totalAreaSqKm).multiply(100);
+  var result_list_10 = result_list_10.add(final_percent) 
+  print(oct_dec[i-10] + '  urban %',final_percent); 
+  }
+}
+var Areas_urban_total = (result_list).cat(result_list_10)
+Areas_urban_total = ee.FeatureCollection(Areas_urban_total.flatten())
+
+Export.table.toDrive({
+  collection: Areas_urban_total,
+  description: after10_year,
+  folder:"training01",  
+  fileFormat: 'CSV'
+});
