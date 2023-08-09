@@ -67,7 +67,7 @@ var chart_NDVI = ui.Chart.image.series({
   imageCollection: byYearMonth,
   region: roi,
   reducer: ee.Reducer.mean(),
-  scale: 250
+  scale: 30
 })
 .setOptions({
           title: 'Mean NDVI Value by Months Pre Event',
