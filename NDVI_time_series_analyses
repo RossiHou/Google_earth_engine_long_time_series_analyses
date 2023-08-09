@@ -1,0 +1,80 @@
+var country = ee.FeatureCollection("USDOS/LSIB_SIMPLE/2017")
+
+var singapore = country.filter(ee.Filter.eq('country_na','Singapore'));
+
+var roi = singapore
+
+function maskcloud(image){
+    var cloudShadowBitMask = (1 << 3);
+  var cloudsBitMask = (1 << 5);
+  // Get the pixel QA band.
+  var qa = image.select('QA_PIXEL');
+  // Both flags should be set to zero, indicating clear conditions.
+  var mask = qa.bitwiseAnd(cloudShadowBitMask).eq(0)
+                 .and(qa.bitwiseAnd(cloudsBitMask).eq(0));
+  return image.updateMask(mask);
+}
+
+function ndvi(image){
+  var ndvi = image.normalizedDifference(['B5','B4'])
+                  .rename("NDVI")
+                  .copyProperties(image,['system:time_start'])
+  return image.addBands(ndvi)
+}
+
+var l8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_TOA")
+            .filterDate("2014-01-01","2022-12-31")
+            .filterBounds(roi)
+            .map(maskcloud)
+            .map(ndvi)
+
+
+var get_timeline = l8.map(function(img){
+                                        var d = ee.Date(ee.Number(img.get('system:time_start')));
+                                        var m = ee.Number(d.get('month'));
+                                        var y = ee.Number(d.get('year'));
+                                        return img.set({'month':m,'year':y})
+                                       });
+
+
+var months = ee.List.sequence(1,12);
+var years = ee.List.sequence(2014, 2022);
+
+var byYearMonth = ee.ImageCollection.fromImages(
+                    years.map(function(y){
+                     var year = ee.Number(y)
+                      return months.map(function(m){
+                        var month = ee.Number(m)
+                        var date = ee.Date.fromYMD(year, month, 1)
+                        return get_timeline.filter(ee.Filter.calendarRange(year, year, "year"))  
+                                    .filter(ee.Filter.calendarRange(month, month, "month")) 
+                                    .select("NDVI").mean()//One month's average
+                                    .set('year',y)
+                                    .set('month',m)
+                                    .set('date',ee.Date.fromYMD(y,m,1))
+                                    .set('system:time_start', date.millis())
+                                    .set("system:index", date.format("yyyyMM"))
+                      });
+                    }).flatten()
+                    );
+
+print('byYearMonth',byYearMonth.first());
+
+
+
+
+var chart_NDVI = ui.Chart.image.series({
+  imageCollection: byYearMonth,
+  region: roi,
+  reducer: ee.Reducer.mean(),
+  scale: 250
+})
+.setOptions({
+          title: 'Mean NDVI Value by Months Pre Event',
+          hAxis: {title: 'Month', titleTextStyle: {italic: false, bold: true}},
+          vAxis: {title: 'NDVI',titleTextStyle: {italic: false, bold: true}},
+  });
+  
+print(chart_NDVI)
+
+
