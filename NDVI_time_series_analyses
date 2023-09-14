@@ -6,7 +6,7 @@ var roi = singapore
 
 function maskcloud(image){
     var cloudShadowBitMask = (1 << 3);
-  var cloudsBitMask = (1 << 5);
+  var cloudsBitMask = (1 << 4);
   // Get the pixel QA band.
   var qa = image.select('QA_PIXEL');
   // Both flags should be set to zero, indicating clear conditions.
